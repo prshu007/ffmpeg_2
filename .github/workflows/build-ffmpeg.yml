@@ -1,137 +1,122 @@
-# .github/workflows/build.yml
-#
-# This GitHub Actions workflow builds a static version of FFmpeg for Linux (amd64)
-# with the libx264 encoder enabled. It is specifically configured to be compatible with
-# a wide range of GLIBC versions, from 2.29 to 2.35 and newer.
-#
-# The workflow is split into two jobs to resolve a GLIBC conflict between the
-# GitHub Actions runner environment and the older build container.
-#
-# 1. 'checkout-source': Runs on a modern runner to check out the code.
-# 2. 'build-ffmpeg': Runs in an older container (ubuntu:18.04) to perform the build.
-
-name: Build Static FFmpeg
+name: Build Static FFmpeg with Glibc Variants
 
 on:
-  # Allows you to run this workflow manually from the Actions tab
-  workflow_dispatch:
-  # Triggers the workflow on push events but only for the main branch
   push:
-    branches: [ "main" ]
+    branches:
+      - main
+  workflow_dispatch: # Allows manual trigger
 
 jobs:
-  # Job 1: Checks out the source code in a modern environment
-  checkout-source:
+  build:
     runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository code
-        uses: actions/checkout@v4
+    strategy:
+      matrix:
+        # Define the glibc versions and corresponding Docker images
+        glibc_version:
+          - { name: "glibc-2.29", image: "ubuntu:19.04" } # Ubuntu 19.04 uses glibc 2.29
+          # Note: Ubuntu 21.04 (glibc 2.33) is EOL, consider a more recent one if possible,
+          # or build a custom Docker image for it. Debian 11 (Bullseye) has 2.31.
+          # For 2.33, 2.34, 2.35, you might need specific custom images or more recent LTS versions.
+          - { name: "glibc-2.35", image: "ubuntu:22.04" } # Ubuntu 22.04 LTS uses glibc 2.35
+          # Add more matrix entries for other glibc versions as needed, e.g.,
+          # - { name: "glibc-2.33", image: "debian:bullseye" } # Debian 11 has glibc 2.31, close enough to 2.33 for some purposes, or you'll need a custom image for exact 2.33.
+          # - { name: "glibc-2.34", image: "ubuntu:21.10" } # Ubuntu 21.10 is EOL.
 
-      - name: Upload source code as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: source-code
-          path: .
-
-  # Job 2: Builds FFmpeg inside the older container for GLIBC compatibility
-  build-ffmpeg:
-    # This job depends on the 'checkout-source' job completing successfully
-    needs: checkout-source
-    runs-on: ubuntu-latest
-    
-    # To ensure compatibility with older GLIBC (e.g., 2.29), we build on
-    # ubuntu:18.04, which has GLIBC 2.27. A binary compiled against an older
-    # GLIBC is forward-compatible with newer versions.
-    container: ubuntu:18.04
+    container:
+      image: ${{ matrix.glibc_version.image }}
+      options: --user root # Run as root to install packages
 
     steps:
-    # Step 1: Download the source code artifact from the previous job
-    - name: Download source code artifact
-      uses: actions/download-artifact@v4
-      with:
-        name: source-code
-        path: /github/workspace # Download to the working directory inside the container
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-    # Step 2: Set up the build environment
-    # This involves creating directories for dependencies, sources, and the final build.
-    - name: Set up build environment
+    - name: Set up build environment for ${{ matrix.glibc_version.name }}
       run: |
-        mkdir -p ~/ffmpeg_sources ~/ffmpeg_build ~/bin
-        echo "Build environment directories created."
-
-    # Step 3: Install required dependencies in the container
-    - name: Install dependencies
-      run: |
-        apt-get update -y
+        apt-get update
         apt-get install -y --no-install-recommends \
-          autoconf \
-          automake \
           build-essential \
-          cmake \
-          git-core \
-          libass-dev \
-          libfreetype6-dev \
-          libgnutls28-dev \
-          libtool \
-          libva-dev \
-          libvdpau-dev \
-          libvorbis-dev \
-          libxcb1-dev \
-          libxcb-shm0-dev \
-          libxcb-xfixes0-dev \
-          meson \
-          nasm \
-          ninja-build \
-          pkg-config \
-          texinfo \
+          git \
           wget \
           yasm \
-          zlib1g-dev
+          pkg-config \
+          libtool \
+          autoconf \
+          automake \
+          cmake \
+          # Add any other build tools or libraries required by other dependencies
+        
+        # Verify glibc version (optional, but good for debugging)
+        ldd --version | head -n 1
 
-    # Step 4: Compile and install libx264
-    - name: Build and install libx264
+    - name: Build libx264 static
       run: |
-        echo "Building libx264 from source..."
-        cd ~/ffmpeg_sources
-        git clone --branch stable --depth 1 https://code.videolan.org/videolan/x264.git
-        cd x264
-        ./configure --prefix="$HOME/ffmpeg_build" --bindir="$HOME/bin" --enable-static --enable-pic
+        X264_VERSION="stable" # Or a specific commit hash/tag
+        FFMPEG_BUILD_DIR="/usr/local/ffmpeg_build_${{ matrix.glibc_version.name }}"
+        mkdir -p $FFMPEG_BUILD_DIR
+
+        # Clone x264
+        git clone --depth 1 https://code.videolan.org/videolan/x264.git /tmp/x264_sources
+        cd /tmp/x264_sources
+
+        # Configure and build x264 statically
+        ./configure \
+          --prefix=$FFMPEG_BUILD_DIR \
+          --enable-static \
+          --disable-shared \
+          --disable-cli # Disable CLI if you only need the library
         make -j$(nproc)
         make install
-        echo "libx264 build and installation complete."
 
-    # Step 5: Compile FFmpeg
-    - name: Build FFmpeg
+        # Clean up x264 sources (optional)
+        rm -rf /tmp/x264_sources
+
+    - name: Build FFmpeg static with libx264
       run: |
-        echo "Building FFmpeg from source..."
-        cd ~/ffmpeg_sources
-        wget -O ffmpeg-snapshot.tar.bz2 https://ffmpeg.org/releases/ffmpeg-snapshot.tar.bz2
-        tar xjvf ffmpeg-snapshot.tar.bz2
-        cd ffmpeg
-        export PATH="$HOME/bin:$PATH"
-        export PKG_CONFIG_PATH="$HOME/ffmpeg_build/lib/pkgconfig"
+        FFMPEG_VERSION="n6.1.1" # Or a specific tag, e.g., "master" for latest
+        FFMPEG_BUILD_DIR="/usr/local/ffmpeg_build_${{ matrix.glibc_version.name }}"
+
+        # Clone FFmpeg
+        git clone --depth 1 https://git.ffmpeg.org/ffmpeg.git /tmp/ffmpeg_sources
+        cd /tmp/ffmpeg_sources
+
+        # Configure FFmpeg
+        # --pkg-config-flags="--static" is crucial for static linking
+        # Ensure all --enable-lib* flags correspond to libraries you've built statically
         ./configure \
-          --prefix="$HOME/ffmpeg_build" \
+          --prefix=$FFMPEG_BUILD_DIR \
           --pkg-config-flags="--static" \
-          --extra-cflags="-I$HOME/ffmpeg_build/include" \
-          --extra-ldflags="-L$HOME/ffmpeg_build/lib" \
-          --extra-libs="-lpthread -lm" \
-          --bindir="$HOME/bin" \
+          --extra-cflags="-I$FFMPEG_BUILD_DIR/include" \
+          --extra-ldflags="-L$FFMPEG_BUILD_DIR/lib" \
+          --bindir=$FFMPEG_BUILD_DIR/bin \
           --enable-gpl \
-          --enable-libass \
-          --enable-libfreetype \
-          --enable-libvorbis \
-          --enable-libx264 \
+          --enable-version3 \
           --enable-nonfree \
           --disable-shared \
-          --enable-static
+          --enable-static \
+          --disable-autodetect \
+          --enable-libx264 \
+          --disable-doc \
+          --disable-ffplay \
+          --disable-ffprobe \
+          # Add other desired libraries here, e.g., --enable-libvpx --enable-libfdk-aac
+          # If you enable more libraries, make sure they are also built statically in a preceding step.
+
         make -j$(nproc)
         make install
-        echo "FFmpeg build and installation complete."
 
-    # Step 6: Upload the final static FFmpeg binary as an artifact
-    - name: Upload FFmpeg static build
+        # Verify the built ffmpeg
+        $FFMPEG_BUILD_DIR/bin/ffmpeg -version
+        ldd $FFMPEG_BUILD_DIR/bin/ffmpeg # Check dynamic dependencies
+
+        # Clean up FFmpeg sources (optional)
+        rm -rf /tmp/ffmpeg_sources
+
+    - name: Upload FFmpeg binaries
       uses: actions/upload-artifact@v4
       with:
-        name: ffmpeg-static-linux-amd64
-        path: ~/bin/ffmpeg
+        name: ffmpeg-static-${{ matrix.glibc_version.name }}-linux-amd64
+        path: /usr/local/ffmpeg_build_${{ matrix.glibc_version.name }}/bin/ffmpeg
+        # If you built ffprobe/ffplay, include them too:
+        # path: /usr/local/ffmpeg_build_${{ matrix.glibc_version.name }}/bin/ffmpeg
+        #       /usr/local/ffmpeg_build_${{ matrix.glibc_version.name }}/bin/ffprobe
+        #       /usr/local/ffmpeg_build_${{ matrix.glibc_version.name }}/bin/ffplay
