@@ -3,6 +3,12 @@
 # This GitHub Actions workflow builds a static version of FFmpeg for Linux (amd64)
 # with the libx264 encoder enabled. It is specifically configured to be compatible with
 # a wide range of GLIBC versions, from 2.29 to 2.35 and newer.
+#
+# The workflow is split into two jobs to resolve a GLIBC conflict between the
+# GitHub Actions runner environment and the older build container.
+#
+# 1. 'checkout-source': Runs on a modern runner to check out the code.
+# 2. 'build-ffmpeg': Runs in an older container (ubuntu:18.04) to perform the build.
 
 name: Build Static FFmpeg
 
@@ -14,19 +20,37 @@ on:
     branches: [ "main" ]
 
 jobs:
-  build:
-    # To ensure compatibility with a wide range of GLIBC versions (specifically
-    # starting from 2.29 as requested), we need to build on an older Linux
-    # distribution. We use an ubuntu:18.04 container, which has GLIBC 2.27.
-    # A binary compiled against an older GLIBC is forward-compatible with newer
-    # versions, thus ensuring it runs on systems with GLIBC 2.29 through 2.35.
+  # Job 1: Checks out the source code in a modern environment
+  checkout-source:
     runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository code
+        uses: actions/checkout@v4
+
+      - name: Upload source code as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-code
+          path: .
+
+  # Job 2: Builds FFmpeg inside the older container for GLIBC compatibility
+  build-ffmpeg:
+    # This job depends on the 'checkout-source' job completing successfully
+    needs: checkout-source
+    runs-on: ubuntu-latest
+    
+    # To ensure compatibility with older GLIBC (e.g., 2.29), we build on
+    # ubuntu:18.04, which has GLIBC 2.27. A binary compiled against an older
+    # GLIBC is forward-compatible with newer versions.
     container: ubuntu:18.04
 
     steps:
-    # Step 1: Checkout the repository code
-    - name: Checkout repository
-      uses: actions/checkout@v4
+    # Step 1: Download the source code artifact from the previous job
+    - name: Download source code artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: source-code
+        path: /github/workspace # Download to the working directory inside the container
 
     # Step 2: Set up the build environment
     # This involves creating directories for dependencies, sources, and the final build.
@@ -35,9 +59,7 @@ jobs:
         mkdir -p ~/ffmpeg_sources ~/ffmpeg_build ~/bin
         echo "Build environment directories created."
 
-    # Step 3: Install required dependencies
-    # These are the packages needed to compile FFmpeg and its dependencies.
-    # We are running as the root user inside the container, so 'sudo' is not needed.
+    # Step 3: Install required dependencies in the container
     - name: Install dependencies
       run: |
         apt-get update -y
@@ -67,33 +89,25 @@ jobs:
           zlib1g-dev
 
     # Step 4: Compile and install libx264
-    # We compile x264 from source to ensure we have a static library to link against.
     - name: Build and install libx264
       run: |
         echo "Building libx264 from source..."
         cd ~/ffmpeg_sources
         git clone --branch stable --depth 1 https://code.videolan.org/videolan/x264.git
         cd x264
-        # Configure the build for a static library
         ./configure --prefix="$HOME/ffmpeg_build" --bindir="$HOME/bin" --enable-static --enable-pic
         make -j$(nproc)
         make install
         echo "libx264 build and installation complete."
 
     # Step 5: Compile FFmpeg
-    # This is the main step where we download and build FFmpeg.
-    # The configuration flags are crucial for creating a static build.
     - name: Build FFmpeg
       run: |
         echo "Building FFmpeg from source..."
         cd ~/ffmpeg_sources
-        # Use a recent but stable release of FFmpeg
         wget -O ffmpeg-snapshot.tar.bz2 https://ffmpeg.org/releases/ffmpeg-snapshot.tar.bz2
         tar xjvf ffmpeg-snapshot.tar.bz2
         cd ffmpeg
-        # The PATH is updated to find the executables compiled in previous steps (like x264)
-        # PKG_CONFIG_PATH is updated to find the .pc files for the compiled libraries
-        # The configure flags are set for a static build and include libx264
         export PATH="$HOME/bin:$PATH"
         export PKG_CONFIG_PATH="$HOME/ffmpeg_build/lib/pkgconfig"
         ./configure \
@@ -115,9 +129,7 @@ jobs:
         make install
         echo "FFmpeg build and installation complete."
 
-    # Step 6: Upload the static FFmpeg binary as an artifact
-    # This makes the compiled binary available for download from the GitHub Actions run summary page.
-    # We use v4, which is the current recommended version.
+    # Step 6: Upload the final static FFmpeg binary as an artifact
     - name: Upload FFmpeg static build
       uses: actions/upload-artifact@v4
       with:
