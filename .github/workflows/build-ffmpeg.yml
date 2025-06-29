@@ -26,7 +26,7 @@ jobs:
     steps:
     # Step 1: Checkout the repository code
     - name: Checkout repository
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
     # Step 2: Set up the build environment
     # This involves creating directories for dependencies, sources, and the final build.
@@ -41,7 +41,7 @@ jobs:
     - name: Install dependencies
       run: |
         apt-get update -y
-        apt-get install -y \
+        apt-get install -y --no-install-recommends \
           autoconf \
           automake \
           build-essential \
@@ -117,8 +117,9 @@ jobs:
 
     # Step 6: Upload the static FFmpeg binary as an artifact
     # This makes the compiled binary available for download from the GitHub Actions run summary page.
+    # We use v4, which is the current recommended version.
     - name: Upload FFmpeg static build
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: ffmpeg-static-linux-amd64
         path: ~/bin/ffmpeg
