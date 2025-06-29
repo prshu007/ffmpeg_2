@@ -1,0 +1,124 @@
+# .github/workflows/build.yml
+#
+# This GitHub Actions workflow builds a static version of FFmpeg for Linux (amd64)
+# with the libx264 encoder enabled. It is specifically configured to be compatible with
+# a wide range of GLIBC versions, from 2.29 to 2.35 and newer.
+
+name: Build Static FFmpeg
+
+on:
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+  # Triggers the workflow on push events but only for the main branch
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    # To ensure compatibility with a wide range of GLIBC versions (specifically
+    # starting from 2.29 as requested), we need to build on an older Linux
+    # distribution. We use an ubuntu:18.04 container, which has GLIBC 2.27.
+    # A binary compiled against an older GLIBC is forward-compatible with newer
+    # versions, thus ensuring it runs on systems with GLIBC 2.29 through 2.35.
+    runs-on: ubuntu-latest
+    container: ubuntu:18.04
+
+    steps:
+    # Step 1: Checkout the repository code
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    # Step 2: Set up the build environment
+    # This involves creating directories for dependencies, sources, and the final build.
+    - name: Set up build environment
+      run: |
+        mkdir -p ~/ffmpeg_sources ~/ffmpeg_build ~/bin
+        echo "Build environment directories created."
+
+    # Step 3: Install required dependencies
+    # These are the packages needed to compile FFmpeg and its dependencies.
+    # We are running as the root user inside the container, so 'sudo' is not needed.
+    - name: Install dependencies
+      run: |
+        apt-get update -y
+        apt-get install -y \
+          autoconf \
+          automake \
+          build-essential \
+          cmake \
+          git-core \
+          libass-dev \
+          libfreetype6-dev \
+          libgnutls28-dev \
+          libtool \
+          libva-dev \
+          libvdpau-dev \
+          libvorbis-dev \
+          libxcb1-dev \
+          libxcb-shm0-dev \
+          libxcb-xfixes0-dev \
+          meson \
+          nasm \
+          ninja-build \
+          pkg-config \
+          texinfo \
+          wget \
+          yasm \
+          zlib1g-dev
+
+    # Step 4: Compile and install libx264
+    # We compile x264 from source to ensure we have a static library to link against.
+    - name: Build and install libx264
+      run: |
+        echo "Building libx264 from source..."
+        cd ~/ffmpeg_sources
+        git clone --branch stable --depth 1 https://code.videolan.org/videolan/x264.git
+        cd x264
+        # Configure the build for a static library
+        ./configure --prefix="$HOME/ffmpeg_build" --bindir="$HOME/bin" --enable-static --enable-pic
+        make -j$(nproc)
+        make install
+        echo "libx264 build and installation complete."
+
+    # Step 5: Compile FFmpeg
+    # This is the main step where we download and build FFmpeg.
+    # The configuration flags are crucial for creating a static build.
+    - name: Build FFmpeg
+      run: |
+        echo "Building FFmpeg from source..."
+        cd ~/ffmpeg_sources
+        # Use a recent but stable release of FFmpeg
+        wget -O ffmpeg-snapshot.tar.bz2 https://ffmpeg.org/releases/ffmpeg-snapshot.tar.bz2
+        tar xjvf ffmpeg-snapshot.tar.bz2
+        cd ffmpeg
+        # The PATH is updated to find the executables compiled in previous steps (like x264)
+        # PKG_CONFIG_PATH is updated to find the .pc files for the compiled libraries
+        # The configure flags are set for a static build and include libx264
+        export PATH="$HOME/bin:$PATH"
+        export PKG_CONFIG_PATH="$HOME/ffmpeg_build/lib/pkgconfig"
+        ./configure \
+          --prefix="$HOME/ffmpeg_build" \
+          --pkg-config-flags="--static" \
+          --extra-cflags="-I$HOME/ffmpeg_build/include" \
+          --extra-ldflags="-L$HOME/ffmpeg_build/lib" \
+          --extra-libs="-lpthread -lm" \
+          --bindir="$HOME/bin" \
+          --enable-gpl \
+          --enable-libass \
+          --enable-libfreetype \
+          --enable-libvorbis \
+          --enable-libx264 \
+          --enable-nonfree \
+          --disable-shared \
+          --enable-static
+        make -j$(nproc)
+        make install
+        echo "FFmpeg build and installation complete."
+
+    # Step 6: Upload the static FFmpeg binary as an artifact
+    # This makes the compiled binary available for download from the GitHub Actions run summary page.
+    - name: Upload FFmpeg static build
+      uses: actions/upload-artifact@v3
+      with:
+        name: ffmpeg-static-linux-amd64
+        path: ~/bin/ffmpeg
